@@ -3,6 +3,7 @@ import pandas as pd
 from datetime import datetime
 import os
 import re
+import sys
 import subprocess
 import streamlit_authenticator as stauth
 import glob
@@ -55,10 +56,10 @@ authenticator = stauth.Authenticate(
 authenticator.login(location='main')
 
 if st.session_state.get("authentication_status") is False:
-    st.error('Nom d\'utilisateur ou mot de passe incorrect')
+    st.error("Nom d'utilisateur ou mot de passe incorrect")
     st.stop()
 elif st.session_state.get("authentication_status") is None:
-    st.warning('Veuillez entrer vos identifiants pour accéder à l\'application')
+    st.warning("Veuillez entrer vos identifiants pour accéder à l'application")
     st.stop()
 
 # ==================== UTILISATEUR CONNECTÉ ====================
@@ -115,35 +116,29 @@ def lister_fichiers_word():
     """Liste les bons selon le format réel :
        0300-BC-SHEA-NAP-2026 - NOM FOURNISSEUR.docx
     """
-    fichiers = glob.glob("*-BC-SHEA-NAP-2026*.docx")
-    
+    dossiers = ["bons_generes", "."]
     fichiers_valides = []
-    for f in fichiers:
-        nom = os.path.basename(f)
-        
-        # Exclure template / prototype
-        if any(x in nom.lower() for x in ["template", "prototype", "modele", "model"]):
-            continue
-            
-        # Garder seulement les fichiers qui commencent par un numéro
-        if re.match(r'^\d{3,}-BC-SHEA-NAP-2026', nom):
-            fichiers_valides.append(f)
-    
-    return sorted(fichiers_valides, reverse=True)
+    for dossier in dossiers:
+        pattern = os.path.join(dossier, "*-BC-SHEA-NAP-2026*.docx")
+        for f in glob.glob(pattern):
+            nom = os.path.basename(f)
+            if any(x in nom.lower() for x in ["template", "prototype", "modele", "model"]):
+                continue
+            if re.match(r'^\d{3,}-BC-SHEA-NAP-2026', nom):
+                fichiers_valides.append(f)
+    return sorted(set(fichiers_valides), reverse=True)
 
 def supprimer_reference(reference_a_supprimer):
     """Supprime une référence de l'Excel"""
     df = charger_donnees()
     if reference_a_supprimer not in df["Reference"].astype(str).values:
         return False, "Cette référence n'existe pas."
-    
     df = df[df["Reference"].astype(str) != str(reference_a_supprimer)]
     df.to_excel(FICHIER_EXCEL, index=False)
     return True, f"La référence {reference_a_supprimer} a été supprimée avec succès."
 
 # ---------- Sidebar : Formulaire d'ajout ----------
 st.sidebar.header("➕ Nouveau Bon de Commande")
-
 df_actuel = charger_donnees()
 prochain_num = obtenir_prochain_numero(df_actuel)
 prochain_num_str = f"{prochain_num:04d}"
@@ -161,7 +156,6 @@ with st.sidebar.form("form_nouveau_bon", clear_on_submit=True):
         st.text_input("Suffixe fixe", value=SUFFIXE_REFERENCE, disabled=True)
 
     utilisateur = st.text_input("Utilisateur (Créé par) *", value=name)
-
     date_emission = st.date_input("Date d'émission", value=datetime.now())
     nom = st.text_input("Nom du Fournisseur *")
     tel_fourn = st.text_input("Téléphone Fournisseur")
@@ -185,7 +179,6 @@ with st.sidebar.form("form_nouveau_bon", clear_on_submit=True):
         else:
             reference = f"{num_clean:04d}{SUFFIXE_REFERENCE}"
             df = charger_donnees()
-
             if reference in df["Reference"].astype(str).values:
                 st.error(f"La référence {reference} existe déjà !")
             else:
@@ -204,7 +197,6 @@ with st.sidebar.form("form_nouveau_bon", clear_on_submit=True):
                     "Numero_Permis": permis.strip(),
                     "Telephone_Chauffeur": tel_chauffeur.strip()
                 }
-
                 df = pd.concat([df, pd.DataFrame([nouvelle_ligne])], ignore_index=True)
                 df.to_excel(FICHIER_EXCEL, index=False)
                 st.success(f"✅ Bon {reference} enregistré avec succès !")
@@ -215,16 +207,12 @@ st.title("📄 Gestion des Bons de Commande – NAP SARL")
 st.markdown("---")
 
 st.subheader("📊 Tableau des Bons de Commande")
-
 df = charger_donnees()
-
 if df.empty:
     st.info("Aucun bon de commande enregistré pour le moment.")
 else:
     st.dataframe(df, width="stretch", height=400)
-
     st.markdown("---")
-
     col1, col2, col3 = st.columns(3)
 
     with col1:
@@ -235,46 +223,49 @@ else:
         if st.button("📄 Générer les nouveaux Bons Word", width="stretch", type="primary"):
             with st.spinner("Génération en cours..."):
                 try:
+                    base_dir = os.path.dirname(os.path.abspath(__file__))
+                    script_path = os.path.join(base_dir, "generer_bons.py")
+                    if not os.path.exists(script_path):
+                        script_path = "generer_bons.py"
                     result = subprocess.run(
-                        ["python", "generer_bons.py"],
+                        [sys.executable, script_path],
                         capture_output=True,
                         text=True,
-                        cwd=os.getcwd()
+                        cwd=base_dir if os.path.isdir(base_dir) else os.getcwd()
                     )
                     if result.returncode == 0:
                         st.success("Bons Word générés avec succès !")
-                        st.code(result.stdout)
+                        if result.stdout:
+                            st.code(result.stdout)
                     else:
                         st.error("Erreur lors de la génération")
-                        st.code(result.stderr)
+                        st.code(result.stderr or result.stdout or "Aucune sortie")
                 except Exception as e:
                     st.error(f"Erreur : {e}")
 
     with col3:
-        with open(FICHIER_EXCEL, "rb") as f:
-            st.download_button(
-                label="⬇️ Télécharger Excel",
-                data=f,
-                file_name="donnees_bons.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                width="stretch"
-            )
+        if os.path.exists(FICHIER_EXCEL):
+            with open(FICHIER_EXCEL, "rb") as f:
+                st.download_button(
+                    label="⬇️ Télécharger Excel",
+                    data=f,
+                    file_name="donnees_bons.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    width="stretch"
+                )
 
 # ---------- SUPPRESSION (réservé à l'admin) ----------
 if username == "admin":
     st.markdown("---")
     st.subheader("🗑️ Supprimer un Bon de Commande (Admin uniquement)")
-
     df = charger_donnees()
     if not df.empty:
         liste_references = df["Reference"].astype(str).tolist()
-        
         reference_a_supprimer = st.selectbox(
             "Choisissez la référence à supprimer :",
             options=liste_references,
             key="select_suppression"
         )
-
         col_del1, col_del2 = st.columns([1, 3])
         with col_del1:
             if st.button("🗑️ Supprimer cette référence", type="primary", width="stretch"):
@@ -292,26 +283,24 @@ if username == "admin":
 # ---------- Téléchargement des Bons Word ----------
 st.markdown("---")
 st.subheader("📥 Télécharger les Bons de Commande (Word)")
-
 col_refresh, _ = st.columns([1, 4])
 with col_refresh:
     if st.button("🔄 Actualiser la liste des fichiers"):
         st.rerun()
 
 fichiers_word = lister_fichiers_word()
-
 if not fichiers_word:
     st.warning("Aucun fichier Word trouvé.")
-    st.info("1. Cliquez d'abord sur « Générer les nouveaux Bons Word »\n2. Puis cliquez sur « Actualiser la liste des fichiers »")
+    st.info(
+        "1. Cliquez d'abord sur « Générer les nouveaux Bons Word »\n"
+        "2. Puis cliquez sur « Actualiser la liste des fichiers »"
+    )
 else:
     st.success(f"**{len(fichiers_word)} bon(s) disponible(s) :**")
-    
     for fichier in fichiers_word:
         col1, col2 = st.columns([5, 1])
-        
         with col1:
             st.write(f"📄 **{os.path.basename(fichier)}**")
-        
         with col2:
             try:
                 with open(fichier, "rb") as f:
