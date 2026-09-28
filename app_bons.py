@@ -3,8 +3,6 @@ import pandas as pd
 from datetime import datetime
 import os
 import re
-import sys
-import subprocess
 import streamlit_authenticator as stauth
 import glob
 
@@ -223,25 +221,15 @@ else:
         if st.button("📄 Générer les nouveaux Bons Word", width="stretch", type="primary"):
             with st.spinner("Génération en cours..."):
                 try:
-                    base_dir = os.path.dirname(os.path.abspath(__file__))
-                    script_path = os.path.join(base_dir, "generer_bons.py")
-                    if not os.path.exists(script_path):
-                        script_path = "generer_bons.py"
-                    result = subprocess.run(
-                        [sys.executable, script_path],
-                        capture_output=True,
-                        text=True,
-                        cwd=base_dir if os.path.isdir(base_dir) else os.getcwd()
-                    )
-                    if result.returncode == 0:
-                        st.success("Bons Word générés avec succès !")
-                        if result.stdout:
-                            st.code(result.stdout)
-                    else:
-                        st.error("Erreur lors de la génération")
-                        st.code(result.stderr or result.stdout or "Aucune sortie")
+                    # Appel direct = même Python que Streamlit (python-docx disponible)
+                    from generer_bons import generer_tous_les_bons
+                    generer_tous_les_bons(forcer_tout=False)
+                    st.success("Bons Word générés avec succès !")
+                    st.rerun()
                 except Exception as e:
-                    st.error(f"Erreur : {e}")
+                    st.error(f"Erreur lors de la génération : {e}")
+                    import traceback
+                    st.code(traceback.format_exc())
 
     with col3:
         if os.path.exists(FICHIER_EXCEL):
