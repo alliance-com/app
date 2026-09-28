@@ -6,6 +6,12 @@ import re
 import streamlit_authenticator as stauth
 import glob
 
+try:
+    import docx
+    st.sidebar.success(f"docx OK : {docx.__version__}")
+except Exception as e:
+    st.sidebar.error(f"docx manquant : {e}")
+
 # ==================== CONFIGURATION ====================
 FICHIER_EXCEL = "donnees_bons.xlsx"
 SUFFIXE_REFERENCE = "-BC-SHEA/NAP-2026"
