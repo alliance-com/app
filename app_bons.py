@@ -6,14 +6,9 @@ import re
 import streamlit_authenticator as stauth
 import glob
 
-try:
-    import docx
-    st.sidebar.success(f"docx OK : {docx.__version__}")
-except Exception as e:
-    st.sidebar.error(f"docx manquant : {e}")
-
 # ==================== CONFIGURATION ====================
 FICHIER_EXCEL = "donnees_bons.xlsx"
+FICHIER_FRS = "fournisseurs.xlsx"
 SUFFIXE_REFERENCE = "-BC-SHEA/NAP-2026"
 # =======================================================
 
@@ -66,7 +61,6 @@ elif st.session_state.get("authentication_status") is None:
     st.warning("Veuillez entrer vos identifiants pour accéder à l'application")
     st.stop()
 
-# ==================== UTILISATEUR CONNECTÉ ====================
 name = st.session_state.get("name")
 username = st.session_state.get("username")
 
@@ -76,7 +70,7 @@ with st.sidebar:
     authenticator.logout(location='sidebar')
     st.divider()
 
-# ---------- Fonctions utilitaires ----------
+# ---------- Fonctions ----------
 def extraire_numero(reference):
     if not reference:
         return 0
@@ -87,10 +81,26 @@ def extraire_numero(reference):
     match_fallback = re.search(r'(\d+)', str(reference))
     return int(match_fallback.group(1)) if match_fallback else 0
 
+def charger_fournisseurs_actifs():
+    """Retourne dict { 'FRS00006 — VLAVONOU PIERRE': (code, nom) }"""
+    if not os.path.exists(FICHIER_FRS):
+        return {}
+    df = pd.read_excel(FICHIER_FRS)
+    if "Actif" in df.columns:
+        df = df[df["Actif"].astype(str).str.upper() == "OUI"]
+    options = {}
+    for _, row in df.iterrows():
+        code = str(row.get("Code", "")).strip()
+        nom = str(row.get("Nom_Fournisseur", "")).strip()
+        if code and nom and nom.lower() not in ("nan", "none"):
+            label = f"{code} — {nom}"
+            options[label] = (code, nom)
+    return options
+
 def charger_donnees():
     colonnes_ordonnees = [
         "Reference", "Date_Emission", "Heure_Creation", "Utilisateur",
-        "Nom_Fournisseur", "Telephone_Fournisseur", "Commune_Origine",
+        "Code_Fournisseur", "Nom_Fournisseur", "Telephone_Fournisseur", "Commune_Origine",
         "Quantite", "Numero_Tracteur", "Chauffeur",
         "Numero_Permis", "Telephone_Chauffeur"
     ]
@@ -100,6 +110,10 @@ def charger_donnees():
             df.insert(2, "Heure_Creation", "")
         if "Utilisateur" not in df.columns:
             df.insert(3, "Utilisateur", "")
+        if "Code_Fournisseur" not in df.columns:
+            # Insérer après Utilisateur
+            idx = list(df.columns).index("Utilisateur") + 1 if "Utilisateur" in df.columns else 4
+            df.insert(idx, "Code_Fournisseur", "")
         cols = [c for c in colonnes_ordonnees if c in df.columns] + [c for c in df.columns if c not in colonnes_ordonnees]
         return df[cols]
     else:
@@ -117,9 +131,6 @@ def obtenir_prochain_numero(df):
     return dernier + 1 if dernier > 0 else 1
 
 def lister_fichiers_word():
-    """Liste les bons selon le format réel :
-       0300-BC-SHEA-NAP-2026 - NOM FOURNISSEUR.docx
-    """
     dossiers = ["bons_generes", "."]
     fichiers_valides = []
     for dossier in dossiers:
@@ -133,7 +144,6 @@ def lister_fichiers_word():
     return sorted(set(fichiers_valides), reverse=True)
 
 def supprimer_reference(reference_a_supprimer):
-    """Supprime une référence de l'Excel"""
     df = charger_donnees()
     if reference_a_supprimer not in df["Reference"].astype(str).values:
         return False, "Cette référence n'existe pas."
@@ -141,11 +151,13 @@ def supprimer_reference(reference_a_supprimer):
     df.to_excel(FICHIER_EXCEL, index=False)
     return True, f"La référence {reference_a_supprimer} a été supprimée avec succès."
 
-# ---------- Sidebar : Formulaire d'ajout ----------
+# ---------- Sidebar : Formulaire ----------
 st.sidebar.header("➕ Nouveau Bon de Commande")
 df_actuel = charger_donnees()
 prochain_num = obtenir_prochain_numero(df_actuel)
 prochain_num_str = f"{prochain_num:04d}"
+
+options_frs = charger_fournisseurs_actifs()
 
 with st.sidebar.form("form_nouveau_bon", clear_on_submit=True):
     st.markdown("**Référence** *(Suffixe automatique fixe)*")
@@ -161,7 +173,18 @@ with st.sidebar.form("form_nouveau_bon", clear_on_submit=True):
 
     utilisateur = st.text_input("Utilisateur (Créé par) *", value=name)
     date_emission = st.date_input("Date d'émission", value=datetime.now())
-    nom = st.text_input("Nom du Fournisseur *")
+
+    # --- Fournisseur lié au code FRS ---
+    if not options_frs:
+        st.error("Aucun fournisseur actif. Créez-en un dans la page Fournisseurs.")
+        choix_frs = ""
+    else:
+        choix_frs = st.selectbox(
+            "Fournisseur *",
+            options=[""] + list(options_frs.keys()),
+            help="Liste issue de fournisseurs.xlsx"
+        )
+
     tel_fourn = st.text_input("Téléphone Fournisseur")
     commune = st.text_input("Commune d'origine")
     quantite = st.text_input("Quantité (ex: 50 MT)")
@@ -174,12 +197,16 @@ with st.sidebar.form("form_nouveau_bon", clear_on_submit=True):
 
     if submitted:
         num_clean = extraire_numero(numero_evolution)
+        code_frs, nom_frs = ("", "")
+        if choix_frs and choix_frs in options_frs:
+            code_frs, nom_frs = options_frs[choix_frs]
+
         if num_clean == 0:
             st.error("Le numéro d'évolution est obligatoire et doit être numérique !")
         elif not utilisateur.strip():
             st.error("Le nom de l'utilisateur est obligatoire !")
-        elif not nom.strip():
-            st.error("Le nom du fournisseur est obligatoire !")
+        elif not code_frs or not nom_frs:
+            st.error("Vous devez sélectionner un fournisseur dans la liste !")
         else:
             reference = f"{num_clean:04d}{SUFFIXE_REFERENCE}"
             df = charger_donnees()
@@ -192,7 +219,8 @@ with st.sidebar.form("form_nouveau_bon", clear_on_submit=True):
                     "Date_Emission": date_emission.strftime("%d/%m/%Y"),
                     "Heure_Creation": heure_creation,
                     "Utilisateur": utilisateur.strip(),
-                    "Nom_Fournisseur": nom.strip(),
+                    "Code_Fournisseur": code_frs,
+                    "Nom_Fournisseur": nom_frs,
                     "Telephone_Fournisseur": tel_fourn.strip(),
                     "Commune_Origine": commune.strip(),
                     "Quantite": quantite.strip(),
@@ -203,7 +231,7 @@ with st.sidebar.form("form_nouveau_bon", clear_on_submit=True):
                 }
                 df = pd.concat([df, pd.DataFrame([nouvelle_ligne])], ignore_index=True)
                 df.to_excel(FICHIER_EXCEL, index=False)
-                st.success(f"✅ Bon {reference} enregistré avec succès !")
+                st.success(f"✅ Bon **{reference}** — {code_frs} {nom_frs}")
                 st.rerun()
 
 # ---------- Zone principale ----------
@@ -227,7 +255,6 @@ else:
         if st.button("📄 Générer les nouveaux Bons Word", width="stretch", type="primary"):
             with st.spinner("Génération en cours..."):
                 try:
-                    # Appel direct = même Python que Streamlit (python-docx disponible)
                     from generer_bons import generer_tous_les_bons
                     generer_tous_les_bons(forcer_tout=False)
                     st.success("Bons Word générés avec succès !")
@@ -248,7 +275,7 @@ else:
                     width="stretch"
                 )
 
-# ---------- SUPPRESSION (réservé à l'admin) ----------
+# ---------- SUPPRESSION (admin) ----------
 if username == "admin":
     st.markdown("---")
     st.subheader("🗑️ Supprimer un Bon de Commande (Admin uniquement)")
@@ -274,7 +301,7 @@ if username == "admin":
     else:
         st.info("Aucun bon à supprimer.")
 
-# ---------- Téléchargement des Bons Word ----------
+# ---------- Téléchargement Word ----------
 st.markdown("---")
 st.subheader("📥 Télécharger les Bons de Commande (Word)")
 col_refresh, _ = st.columns([1, 4])
@@ -309,6 +336,5 @@ else:
             except Exception as e:
                 st.error(f"Erreur : {e}")
 
-# ---------- Pied de page ----------
 st.markdown("---")
-st.caption("NAP SARL – Gestion automatisée des bons de commande Karité")
+st.caption("NAP SARL – Bons de commande liés aux codes fournisseurs (FRS)")

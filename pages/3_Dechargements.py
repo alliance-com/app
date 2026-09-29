@@ -7,7 +7,6 @@ from openpyxl import load_workbook
 
 st.set_page_config(page_title="Déchargements", page_icon="🚛", layout="wide")
 
-# Vérifier authentification
 if not st.session_state.get("authentication_status"):
     st.warning("Veuillez vous connecter depuis la page d'accueil.")
     st.stop()
@@ -19,12 +18,13 @@ username = st.session_state.get("username")
 FICHIER_BONS = "donnees_bons.xlsx"
 FICHIER_TRACKER = "SHEA_PURCHASE TRACKER.xlsx"
 FICHIER_DECHARGEMENTS = "dechargements.xlsx"
+FICHIER_FRS = "fournisseurs.xlsx"
 # =======================================================
 
 st.title("🚛 Enregistrement des Déchargements (Tickets de Pont)")
+st.caption("Montant dû = Poids net (kg) × PU fournisseur (FCFA/kg)")
 st.markdown("---")
 
-# ---------- Fonctions ----------
 def charger_bons_app():
     if not os.path.exists(FICHIER_BONS):
         return pd.DataFrame()
@@ -49,6 +49,33 @@ def charger_dechargements():
         "Montant_Du", "Montant_Paye", "Solde_Restant", "Statut_Paiement",
         "Bon_Paiement", "Statut_Livraison", "Lieu_Stockage", "Utilisateur"
     ])
+
+def charger_pu_fournisseur(code_frs=None, nom_frs=None):
+    """Retourne PU_FCFA_KG depuis fournisseurs.xlsx (par code ou nom)."""
+    if not os.path.exists(FICHIER_FRS):
+        return 0.0
+    try:
+        df = pd.read_excel(FICHIER_FRS)
+    except Exception:
+        return 0.0
+    if df.empty or "PU_FCFA_KG" not in df.columns:
+        return 0.0
+
+    row = None
+    if code_frs:
+        m = df[df["Code"].astype(str).str.strip().str.upper() == str(code_frs).strip().upper()]
+        if not m.empty:
+            row = m.iloc[0]
+    if row is None and nom_frs:
+        m = df[df["Nom_Fournisseur"].astype(str).str.strip().str.upper() == str(nom_frs).strip().upper()]
+        if not m.empty:
+            row = m.iloc[0]
+    if row is None:
+        return 0.0
+    try:
+        return float(row.get("PU_FCFA_KG") or 0)
+    except Exception:
+        return 0.0
 
 def normaliser_camion(val):
     if not val or (isinstance(val, float) and pd.isna(val)):
@@ -85,13 +112,6 @@ def match_camion(camion_saisi_norm, camion_row_raw):
     return any(p in camion_row for p in parties)
 
 def rechercher_par_camion(numero_camion, masse_saisie, df_app, df_tracker, df_dech):
-    """
-    Recherche intelligente :
-    - Match N° camion
-    - Priorité impayés / non déchargés
-    - Vérification masse (MT)
-    - Alertes si écart ou doublon
-    """
     numero_camion = str(numero_camion).strip()
     if not numero_camion:
         return [], "Veuillez saisir un N° Camion."
@@ -101,7 +121,6 @@ def rechercher_par_camion(numero_camion, masse_saisie, df_app, df_tracker, df_de
     resultats = []
     alertes = []
 
-    # 1. Bons app
     if not df_app.empty and "Numero_Tracteur" in df_app.columns:
         for _, row in df_app.iterrows():
             if not match_camion(camion_norm, row.get("Numero_Tracteur", "")):
@@ -113,28 +132,34 @@ def rechercher_par_camion(numero_camion, masse_saisie, df_app, df_tracker, df_de
                 diff = abs(masse_mt - masse_bon)
                 score_masse = "OK" if diff <= 2.0 else f"ÉCART {diff:.1f} MT"
 
+            code_frs = str(row.get("Code_Fournisseur", "") or "").strip()
+            fourn = str(row.get("Nom_Fournisseur", "") or "").strip()
+            pu = charger_pu_fournisseur(code_frs, fourn)
+
             resultats.append({
                 "source": "App (nouveau format)",
                 "Reference": str(row.get("Reference", "")),
-                "Fournisseur": str(row.get("Nom_Fournisseur", "")),
+                "Code_Frs": code_frs,
+                "Fournisseur": fourn,
                 "Date": str(row.get("Date_Emission", "")),
                 "Quantite": str(qte),
                 "Masse_MT": masse_bon,
                 "Camion": str(row.get("Numero_Tracteur", "")),
                 "Chauffeur": str(row.get("Chauffeur", "")),
+                "PU_FCFA_KG": pu,
                 "Statut_paiement": "—",
                 "score_masse": score_masse,
                 "priorite": 1,
                 "deja_decharge": False,
             })
 
-    # 2. Tracker Bons de Commande
     if not df_tracker.empty:
         col_camion = next((c for c in df_tracker.columns if "camion" in c.lower()), None)
         col_bc = next((c for c in df_tracker.columns if "bc" in c.lower()), None)
         col_fourn = next((c for c in df_tracker.columns if "fournisseur" in c.lower()), None)
         col_qte = next((c for c in df_tracker.columns if "qty" in c.lower() or "quantit" in c.lower()), None)
         col_statut = next((c for c in df_tracker.columns if "statut" in c.lower() and "livr" in c.lower()), None)
+        col_code = next((c for c in df_tracker.columns if "code" in c.lower() and "frs" in c.lower()), None)
 
         if col_camion:
             for _, row in df_tracker.iterrows():
@@ -149,23 +174,27 @@ def rechercher_par_camion(numero_camion, masse_saisie, df_app, df_tracker, df_de
 
                 statut_liv = str(row.get(col_statut, "")) if col_statut else ""
                 priorite = 2 if "DECHARGE" in statut_liv.upper() else 1
+                fourn = str(row.get(col_fourn, "")) if col_fourn else ""
+                code_frs = str(row.get(col_code, "")) if col_code else ""
+                pu = charger_pu_fournisseur(code_frs, fourn)
 
                 resultats.append({
                     "source": "Tracker",
                     "Reference": str(row.get(col_bc, "")) if col_bc else "",
-                    "Fournisseur": str(row.get(col_fourn, "")) if col_fourn else "",
+                    "Code_Frs": code_frs,
+                    "Fournisseur": fourn,
                     "Date": str(row.get("Date", "")),
                     "Quantite": str(qte),
                     "Masse_MT": masse_bon,
                     "Camion": str(row.get(col_camion, "")),
                     "Chauffeur": str(row.get("Contact Chauffeur", "")),
+                    "PU_FCFA_KG": pu,
                     "Statut_paiement": statut_liv,
                     "score_masse": score_masse,
                     "priorite": priorite,
                     "deja_decharge": "DECHARGE" in statut_liv.upper(),
                 })
 
-    # 3. Déchargements déjà saisis
     if not df_dech.empty and "N_Camion" in df_dech.columns:
         for _, row in df_dech.iterrows():
             if not match_camion(camion_norm, row.get("N_Camion", "")):
@@ -178,16 +207,22 @@ def rechercher_par_camion(numero_camion, masse_saisie, df_app, df_tracker, df_de
                 score_masse = "OK" if diff <= 2.0 else f"ÉCART {diff:.1f} MT"
 
             priorite = 0 if statut_p in ("NON PAYE", "PARTIEL") else 3
+            try:
+                pu = float(row.get("PU_FCFA_KG") or 0)
+            except Exception:
+                pu = 0.0
 
             resultats.append({
                 "source": "Déchargement déjà saisi",
                 "Reference": str(row.get("N_BC", "")),
+                "Code_Frs": str(row.get("Code_Frs", "") or ""),
                 "Fournisseur": str(row.get("Fournisseur", "")),
                 "Date": str(row.get("Date_Dechargement", "")),
                 "Quantite": f"{row.get('Poids_Net_KG', '')} KG",
                 "Masse_MT": masse_d,
                 "Camion": str(row.get("N_Camion", "")),
                 "Chauffeur": "",
+                "PU_FCFA_KG": pu,
                 "Statut_paiement": statut_p,
                 "score_masse": score_masse,
                 "priorite": priorite,
@@ -196,7 +231,6 @@ def rechercher_par_camion(numero_camion, masse_saisie, df_app, df_tracker, df_de
 
     resultats.sort(key=lambda x: (x.get("priorite", 9), str(x.get("Reference", ""))))
 
-    # Alertes
     if not resultats:
         alertes.append("⚠️ Aucun bon trouvé pour ce N° Camion. Vérifiez le numéro ou créez d'abord le bon de commande.")
     else:
@@ -268,21 +302,19 @@ df_app = charger_bons_app()
 df_tracker = charger_bons_tracker()
 df_dech = charger_dechargements()
 
-# ---------- Étape 1 : Recherche Camion + Masse ----------
+# ---------- Étape 1 ----------
 st.subheader("1️⃣ Vérification Camion + Masse")
 
 col_r1, col_r2 = st.columns(2)
 with col_r1:
     numero_camion_saisi = st.text_input(
         "N° Camion / Tracteur / Remorque *",
-        placeholder="Ex: CA7583RB ou CA7583RB/AP2290RB",
-        help="Le même camion peut servir plusieurs fournisseurs → la masse aide à discriminer"
+        placeholder="Ex: CA7583RB ou CA7583RB/AP2290RB"
     )
 with col_r2:
     masse_saisie = st.text_input(
         "Masse sur ticket (MT ou KG)",
-        placeholder="Ex: 49.70 MT ou 49700 KG",
-        help="Optionnel mais recommandé pour éviter les confusions"
+        placeholder="Ex: 49.70 MT ou 49700 KG"
     )
 
 resultats = []
@@ -292,7 +324,6 @@ if numero_camion_saisi:
     resultats, message_alerte = rechercher_par_camion(
         numero_camion_saisi, masse_saisie, df_app, df_tracker, df_dech
     )
-
     if message_alerte:
         if "⚠️" in message_alerte:
             st.warning(message_alerte)
@@ -302,8 +333,7 @@ if numero_camion_saisi:
     if not resultats:
         st.error("Aucune correspondance. Ne pas enregistrer sans vérifier.")
     else:
-        st.success(f"**{len(resultats)} résultat(s) trouvé(s)** (triés par priorité)")
-
+        st.success(f"**{len(resultats)} résultat(s) trouvé(s)**")
         for i, r in enumerate(resultats):
             badge = ""
             if r.get("deja_decharge"):
@@ -314,36 +344,37 @@ if numero_camion_saisi:
                 badge += " ✅ Masse OK"
             elif r.get("score_masse") and "ÉCART" in str(r.get("score_masse", "")):
                 badge += f" ⚠️ {r['score_masse']}"
+            pu_aff = r.get("PU_FCFA_KG") or 0
+            if pu_aff:
+                badge += f" · PU {pu_aff:.0f} F/kg"
 
             with st.expander(
                 f"📄 {r['Reference']} — {r['Fournisseur']} ({r['source']}){badge}",
                 expanded=(i == 0 and r.get("priorite", 9) <= 1)
             ):
                 st.write(f"**Référence BC :** `{r['Reference']}`")
+                st.write(f"**Code FRS :** `{r.get('Code_Frs') or '—'}`")
                 st.write(f"**Fournisseur :** {r['Fournisseur']}")
+                st.write(f"**PU fournisseur :** {pu_aff:.0f} FCFA/kg" if pu_aff else "**PU :** non renseigné dans fournisseurs.xlsx")
                 st.write(f"**Date :** {r['Date']}")
                 st.write(f"**Quantité / Masse :** {r['Quantite']}")
                 st.write(f"**Camion :** {r['Camion']}")
-                st.write(f"**Chauffeur / Contact :** {r.get('Chauffeur', '—')}")
-                st.write(f"**Statut :** {r.get('Statut_paiement', '—')}")
                 if r.get("deja_decharge"):
-                    st.error(
-                        "Ce déchargement existe déjà. "
-                        "N'enregistrez un nouveau que si c'est un **nouveau passage** du camion "
-                        "(autre fournisseur ou autre bon)."
-                    )
+                    st.error("Déjà déchargé — n'enregistrez que si nouveau passage.")
 
-# ---------- Étape 2 : Formulaire ----------
+# ---------- Étape 2 ----------
 st.markdown("---")
 st.subheader("2️⃣ Enregistrer le déchargement (Ticket de Pont)")
 
+bc_selectionne = ""
+fournisseur_selectionne = ""
+code_frs_sel = ""
+pu_sel = 0.0
+camion_selectionne = numero_camion_saisi if numero_camion_saisi else ""
+
 if not resultats:
-    st.info("Commencez par rechercher un N° Camion (et idéalement la masse) ci-dessus.")
-    bc_selectionne = ""
-    fournisseur_selectionne = ""
-    camion_selectionne = numero_camion_saisi if numero_camion_saisi else ""
+    st.info("Commencez par rechercher un N° Camion ci-dessus.")
 else:
-    # Proposer en premier les "à décharger"
     options_bc = []
     for r in resultats:
         prefix = ""
@@ -358,9 +389,13 @@ else:
     bc_selectionne = resultats[idx]["Reference"]
     fournisseur_selectionne = resultats[idx]["Fournisseur"]
     camion_selectionne = resultats[idx]["Camion"]
+    code_frs_sel = resultats[idx].get("Code_Frs") or ""
+    pu_sel = float(resultats[idx].get("PU_FCFA_KG") or 0)
+    if pu_sel <= 0:
+        pu_sel = charger_pu_fournisseur(code_frs_sel, fournisseur_selectionne)
 
     if resultats[idx].get("deja_decharge"):
-        st.warning("Vous avez sélectionné un déchargement déjà enregistré. Vérifiez avant de valider.")
+        st.warning("Déchargement déjà enregistré — vérifiez avant de valider.")
 
 with st.form("form_dechargement", clear_on_submit=True):
     col1, col2, col3 = st.columns(3)
@@ -368,7 +403,7 @@ with st.form("form_dechargement", clear_on_submit=True):
     with col1:
         date_dechargement = st.date_input("Date de déchargement *", value=datetime.now())
         n_bc = st.text_input("N° BC *", value=bc_selectionne)
-        code_frs = st.text_input("Code Frs", placeholder="FRS00016")
+        code_frs = st.text_input("Code Frs", value=code_frs_sel)
         fournisseur = st.text_input("Fournisseur *", value=fournisseur_selectionne)
 
     with col2:
@@ -378,7 +413,13 @@ with st.form("form_dechargement", clear_on_submit=True):
         nb_sacs = st.number_input("Nb Sacs", min_value=0, step=1)
 
     with col3:
-        pu = st.number_input("PU (FCFA/KG) *", min_value=0.0, value=330.0, step=1.0)
+        pu = st.number_input(
+            "PU (FCFA/KG) *",
+            min_value=0.0,
+            value=float(pu_sel) if pu_sel > 0 else 0.0,
+            step=1.0,
+            help="Prérempli depuis fournisseurs.xlsx — modifiable si besoin"
+        )
         montant_paye = st.number_input("Montant Payé (FCFA)", min_value=0.0, step=1000.0)
         statut_paiement = st.selectbox("Statut Paiement", ["NON PAYE", "PARTIEL", "PAYE"])
         bon_paiement = st.text_input("Bon / N° Chèque de paiement")
@@ -386,28 +427,33 @@ with st.form("form_dechargement", clear_on_submit=True):
 
     montant_du = poids_net * pu if poids_net and pu else 0
     solde = montant_du - montant_paye
-    st.markdown(f"**Montant Dû calculé :** `{montant_du:,.0f} FCFA`  |  **Solde restant :** `{solde:,.0f} FCFA`")
+    st.markdown(
+        f"**Calcul :** `{poids_net:,.0f} kg × {pu:,.0f} FCFA/kg = "
+        f"**{montant_du:,.0f} FCFA**`  |  Solde : **{solde:,.0f} FCFA**"
+    )
 
     submitted = st.form_submit_button("💾 Enregistrer le déchargement", type="primary", width="stretch")
 
     if submitted:
         if not n_bc.strip() or not n_camion.strip() or not weighment.strip() or poids_net <= 0:
-            st.error("Champs obligatoires (*) : N° BC, N° Camion, Ticket pont, Poids Net.")
+            st.error("Champs obligatoires : N° BC, N° Camion, Ticket pont, Poids Net.")
+        elif pu <= 0:
+            st.error("PU obligatoire. Renseignez-le dans Fournisseurs ou saisissez-le ici.")
         else:
-            # Contrôle anti-doublon simple : même BC + même camion + même ticket
             df_exist = charger_dechargements()
             doublon = False
             if not df_exist.empty:
                 mask = (
                     (df_exist["N_BC"].astype(str) == n_bc.strip()) &
-                    (df_exist["N_Camion"].astype(str).str.upper().str.contains(normaliser_camion(n_camion)[:8], na=False)) &
+                    (df_exist["N_Camion"].astype(str).str.upper().str.contains(
+                        normaliser_camion(n_camion)[:8], na=False)) &
                     (df_exist["Weighment_Ticket"].astype(str) == weighment.strip())
                 )
                 if mask.any():
                     doublon = True
 
             if doublon:
-                st.error("⚠️ Ce déchargement (même BC + camion + ticket) existe déjà. Enregistrement annulé.")
+                st.error("⚠️ Même BC + camion + ticket déjà enregistré.")
             else:
                 ligne = {
                     "Date_Dechargement": date_dechargement.strftime("%d/%m/%Y"),
@@ -431,7 +477,10 @@ with st.form("form_dechargement", clear_on_submit=True):
                 ok, message = sauvegarder_dechargement(ligne)
                 if ok:
                     st.success(f"✅ {message}")
-                    st.success(f"Bon **{n_bc}** — Camion **{n_camion}**")
+                    st.success(
+                        f"Bon **{n_bc}** — Camion **{n_camion}** — "
+                        f"{poids_net:,.0f} kg × {pu:,.0f} = **{montant_du:,.0f} FCFA**"
+                    )
                 else:
                     st.error(message)
                 st.rerun()
@@ -442,9 +491,8 @@ st.subheader("📋 Déchargements déjà enregistrés")
 
 df_dech = charger_dechargements()
 if df_dech.empty:
-    st.info("Aucun déchargement enregistré pour le moment.")
+    st.info("Aucun déchargement enregistré.")
 else:
-    # Filtres rapides
     col_f1, col_f2 = st.columns(2)
     with col_f1:
         filtre_statut = st.selectbox("Filtrer statut paiement", ["Tous", "NON PAYE", "PARTIEL", "PAYE"])
@@ -458,14 +506,13 @@ else:
         df_aff = df_aff[df_aff["N_Camion"].astype(str).str.contains(filtre_cam, case=False, na=False)]
 
     st.dataframe(df_aff, width="stretch", height=300)
-
     with open(FICHIER_DECHARGEMENTS, "rb") as f:
         st.download_button(
-            label="⬇️ Télécharger le fichier des déchargements",
+            label="⬇️ Télécharger déchargements.xlsx",
             data=f,
             file_name="dechargements.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
 
 st.markdown("---")
-st.caption("NAP SARL – Vérification Camion + Masse • Anti-doublon • Priorité impayés")
+st.caption("NAP SARL – Montant = Poids × PU fournisseur · Anti-doublon · Priorité impayés")
