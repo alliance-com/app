@@ -1,22 +1,27 @@
 from docx import Document
-from docx.shared import Pt, Cm, RGBColor, Twips
+from docx.shared import Pt, Cm, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH
-from docx.enum.table import WD_TABLE_ALIGNMENT, WD_ROW_HEIGHT_RULE
 from docx.oxml.ns import qn
 from docx.oxml import OxmlElement
 from lxml import etree
 from datetime import datetime
+from io import BytesIO
 import os
+
+try:
+    import qrcode
+except ImportError:
+    qrcode = None
 
 DOSSIER_SORTIE = "bons_paiement"
 os.makedirs(DOSSIER_SORTIE, exist_ok=True)
 
-# Couleurs modernes
 BLEU_FONCE = RGBColor(15, 40, 80)
 BLEU_MOYEN = RGBColor(30, 90, 160)
 GRIS_TEXTE = RGBColor(50, 50, 50)
 GRIS_CLAIR = RGBColor(120, 120, 120)
 VERT_OK = RGBColor(20, 120, 70)
+
 
 def set_run_font(run, size=10, bold=False, color=None, name="Calibri"):
     run.font.size = Pt(size)
@@ -26,6 +31,7 @@ def set_run_font(run, size=10, bold=False, color=None, name="Calibri"):
     if color:
         run.font.color.rgb = color
 
+
 def shade_cell(cell, hex_color):
     tc = cell._tc
     tcPr = tc.get_or_add_tcPr()
@@ -33,6 +39,7 @@ def shade_cell(cell, hex_color):
     shd.set(qn("w:fill"), hex_color)
     shd.set(qn("w:val"), "clear")
     tcPr.append(shd)
+
 
 def set_cell_margins(cell, top=40, bottom=40, left=60, right=60):
     tc = cell._tc
@@ -44,6 +51,7 @@ def set_cell_margins(cell, top=40, bottom=40, left=60, right=60):
         node.set(qn("w:type"), "dxa")
         tcMar.append(node)
     tcPr.append(tcMar)
+
 
 def add_bottom_border(paragraph, color="1E5AA0", size="12"):
     p = paragraph._p
@@ -57,12 +65,26 @@ def add_bottom_border(paragraph, color="1E5AA0", size="12"):
     pBdr.append(bottom)
     pPr.append(pBdr)
 
+
+def generer_qr_png_bytes(texte: str) -> BytesIO:
+    if qrcode is None:
+        raise ImportError("Installez qrcode : pip install qrcode[pil]")
+    qr = qrcode.QRCode(
+        version=None,
+        error_correction=qrcode.constants.ERROR_CORRECT_M,
+        box_size=6,
+        border=2,
+    )
+    qr.add_data(texte)
+    qr.make(fit=True)
+    img = qr.make_image(fill_color="black", back_color="white")
+    buf = BytesIO()
+    img.save(buf, format="PNG")
+    buf.seek(0)
+    return buf
+
+
 def ajouter_filigrane_centre(doc, reference):
-    """
-    Vrai filigrane au centre de la page (derrière le texte).
-    STE NAP SARL + N° référence + date du jour.
-    N'ajoute aucune page.
-    """
     date_str = datetime.now().strftime("%d/%m/%Y")
     texte = f"STE NAP SARL  •  {reference}  •  {date_str}"
 
@@ -76,12 +98,10 @@ def ajouter_filigrane_centre(doc, reference):
 
     r = OxmlElement("w:r")
     paragraph._p.append(r)
-
     rPr = OxmlElement("w:rPr")
     noProof = OxmlElement("w:noProof")
     rPr.append(noProof)
     r.append(rPr)
-
     pict = OxmlElement("w:pict")
     r.append(pict)
 
@@ -118,6 +138,7 @@ def ajouter_filigrane_centre(doc, reference):
     shape = etree.fromstring(shape_xml)
     pict.append(shape)
 
+
 def generer_bon_paiement(data):
     doc = Document()
 
@@ -129,9 +150,40 @@ def generer_bon_paiement(data):
         section.page_width = Cm(21.0)
         section.page_height = Cm(29.7)
 
-    # ----- FILIGRANE au centre de la page -----
     reference = str(data.get("No_transaction", ""))
     ajouter_filigrane_centre(doc, reference)
+
+    # ========== QR HAUT DROITE ==========
+    heure_gen = datetime.now().strftime("%H:%M:%S")
+    utilisateur_gen = str(
+        data.get("Utilisateur") or data.get("Cree_par") or data.get("VALIDATEUR") or "Systeme"
+    ).strip()
+    no_trans = str(data.get("No_transaction", "PAIEMENT")).strip()
+    try:
+        montant_str = f"{float(data.get('Montant', 0)):.0f}"
+    except Exception:
+        montant_str = str(data.get("Montant", "0"))
+    benef = str(data.get("Beneficiaire") or data.get("Prestataire") or "").strip()
+
+    texte_qr = (
+        f"STE NAP SARL|PAY|{no_trans}|{montant_str}|{benef}|{heure_gen}|{utilisateur_gen}"
+    )
+
+    # Tableau 2 colonnes : vide à gauche, QR à droite
+    table_qr = doc.add_table(rows=1, cols=2)
+    table_qr.autofit = True
+    cell_g = table_qr.rows[0].cells[0]
+    cell_d = table_qr.rows[0].cells[1]
+    cell_g.text = ""
+    cell_d.text = ""
+    p_qr = cell_d.paragraphs[0]
+    p_qr.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+    run_qr = p_qr.add_run()
+    run_qr.add_picture(generer_qr_png_bytes(texte_qr), width=Cm(2.2))
+    p_leg = cell_d.add_paragraph()
+    p_leg.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+    r_leg = p_leg.add_run("Scan – STE NAP SARL")
+    set_run_font(r_leg, size=7, color=GRIS_CLAIR)
 
     # ========== BANDEAU ENTÊTE ==========
     table_header = doc.add_table(rows=1, cols=1)
@@ -155,7 +207,6 @@ def generer_bon_paiement(data):
 
     doc.add_paragraph("")
 
-    # ========== TITRE ==========
     titre = doc.add_paragraph()
     titre.alignment = WD_ALIGN_PARAGRAPH.CENTER
     rt = titre.add_run("BON DE PAIEMENT")
@@ -164,7 +215,6 @@ def generer_bon_paiement(data):
 
     doc.add_paragraph("")
 
-    # ========== BLOC INFOS (2 colonnes) ==========
     table_info = doc.add_table(rows=5, cols=4)
     table_info.autofit = True
 
@@ -214,7 +264,6 @@ def generer_bon_paiement(data):
 
     doc.add_paragraph("")
 
-    # ========== DÉTAILS DES OPÉRATIONS ==========
     p_sec = doc.add_paragraph()
     rs = p_sec.add_run("DÉTAILS DES OPÉRATIONS")
     set_run_font(rs, size=10, bold=True, color=BLEU_MOYEN)
@@ -276,7 +325,6 @@ def generer_bon_paiement(data):
 
     doc.add_paragraph("")
 
-    # ========== MONTANT EN LETTRES ==========
     table_lettres = doc.add_table(rows=1, cols=1)
     cell_l = table_lettres.rows[0].cells[0]
     shade_cell(cell_l, "F7F9FC")
@@ -289,7 +337,6 @@ def generer_bon_paiement(data):
 
     doc.add_paragraph("")
 
-    # ========== MODE DE PAIEMENT ==========
     table_mode = doc.add_table(rows=1, cols=3)
     table_mode.autofit = True
 
@@ -313,7 +360,6 @@ def generer_bon_paiement(data):
     doc.add_paragraph("")
     doc.add_paragraph("")
 
-    # ========== SIGNATURES ==========
     table_sign = doc.add_table(rows=3, cols=3)
     table_sign.autofit = True
 
@@ -342,7 +388,6 @@ def generer_bon_paiement(data):
 
     doc.add_paragraph("")
 
-    # ========== NOTE (rouge gras) ==========
     note = doc.add_paragraph()
     note.alignment = WD_ALIGN_PARAGRAPH.CENTER
     rn = note.add_run(
@@ -351,9 +396,8 @@ def generer_bon_paiement(data):
     )
     set_run_font(rn, size=8, bold=True, color=RGBColor(180, 0, 0))
 
-    # Sauvegarde
-    no_trans = str(data.get("No_transaction", "PAIEMENT")).replace("/", "-").replace("\\", "-")
-    nom_fichier = f"Bon_Paiement_{no_trans}.docx"
+    no_trans_file = str(data.get("No_transaction", "PAIEMENT")).replace("/", "-").replace("\\", "-")
+    nom_fichier = f"Bon_Paiement_{no_trans_file}.docx"
     chemin = os.path.join(DOSSIER_SORTIE, nom_fichier)
     doc.save(chemin)
     return chemin

@@ -1,14 +1,20 @@
 from docx import Document
 from openpyxl import load_workbook
 from datetime import datetime
-from docx.shared import RGBColor, Pt
+from docx.shared import RGBColor, Pt, Cm
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from lxml import etree
+from io import BytesIO
 import os
 import re
 import sys
+
+try:
+    import qrcode
+except ImportError:
+    qrcode = None
 
 # ==================== CONFIGURATION ====================
 FICHIER_EXCEL = "donnees_bons.xlsx"
@@ -30,12 +36,75 @@ if sys.stderr and hasattr(sys.stderr, "reconfigure"):
 
 os.makedirs(DOSSIER_SORTIE, exist_ok=True)
 
+
+def generer_qr_png_bytes(texte: str) -> BytesIO:
+    if qrcode is None:
+        raise ImportError("Installez qrcode : pip install qrcode[pil]")
+    qr = qrcode.QRCode(
+        version=None,
+        error_correction=qrcode.constants.ERROR_CORRECT_M,
+        box_size=6,
+        border=2,
+    )
+    qr.add_data(texte)
+    qr.make(fit=True)
+    img = qr.make_image(fill_color="black", back_color="white")
+    buf = BytesIO()
+    img.save(buf, format="PNG")
+    buf.seek(0)
+    return buf
+
+
+def inserer_qr_haut_droite(doc, texte_qr: str, largeur_cm: float = 2.2):
+    """QR en haut à droite (coin supérieur droit)."""
+    if doc.paragraphs:
+        p = doc.paragraphs[0].insert_paragraph_before()
+    else:
+        p = doc.add_paragraph()
+    p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+    run = p.add_run()
+    run.add_picture(generer_qr_png_bytes(texte_qr), width=Cm(largeur_cm))
+    # Petite légende sous le QR, aussi à droite
+    if doc.paragraphs:
+        leg = doc.paragraphs[0].insert_paragraph_before() if False else None
+    # Légende juste après le paragraphe QR : on récupère le paragraphe qu'on vient de créer
+    # (dernier insert = premier body para)
+    p_leg = doc.paragraphs[0].insert_paragraph_before() if False else doc.paragraphs[1] if len(doc.paragraphs) > 1 else None
+    # Simpler: add caption on same structure
+    # Re-get first paragraph after our QR - actually insert_paragraph_before stacks in reverse
+    # Clean approach: one right-aligned block
+    pass
+
+
+def inserer_qr_haut_droite(doc, texte_qr: str, largeur_cm: float = 2.2):
+    """QR + légende en haut à droite."""
+    # Légende d'abord puis QR : avec insert_before, le dernier inséré se retrouve en haut
+    if doc.paragraphs:
+        p_leg = doc.paragraphs[0].insert_paragraph_before()
+    else:
+        p_leg = doc.add_paragraph()
+        p_qr = doc.add_paragraph()
+        p_qr.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+        run = p_qr.add_run()
+        run.add_picture(generer_qr_png_bytes(texte_qr), width=Cm(largeur_cm))
+        p_leg.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+        r = p_leg.add_run("Scan – STE NAP SARL")
+        r.font.size = Pt(7)
+        r.font.italic = True
+        return
+
+    p_leg.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+    r = p_leg.add_run("Scan – STE NAP SARL")
+    r.font.size = Pt(7)
+    r.font.italic = True
+
+    p_qr = doc.paragraphs[0].insert_paragraph_before()
+    p_qr.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+    run = p_qr.add_run()
+    run.add_picture(generer_qr_png_bytes(texte_qr), width=Cm(largeur_cm))
+
+
 def ajouter_filigrane_centre(doc, reference):
-    """
-    Vrai filigrane au centre de la page (derrière le texte).
-    STE NAP SARL + N° référence + date du jour.
-    N'ajoute aucune page.
-    """
     date_str = datetime.now().strftime("%d/%m/%Y")
     texte = f"STE NAP SARL  •  {reference}  •  {date_str}"
 
@@ -91,6 +160,7 @@ def ajouter_filigrane_centre(doc, reference):
     shape = etree.fromstring(shape_xml)
     pict.append(shape)
 
+
 def extraire_numero(reference):
     if not reference:
         return 0
@@ -101,11 +171,13 @@ def extraire_numero(reference):
     match_fallback = re.search(r'(\d+)', str(reference))
     return int(match_fallback.group(1)) if match_fallback else 0
 
+
 def formater_reference(reference_brute):
     num = extraire_numero(reference_brute)
     if num > 0:
         return f"{num:04d}{SUFFIXE_REFERENCE}"
     return str(reference_brute).strip()
+
 
 def assainir_nom_fichier(nom):
     if not nom:
@@ -114,6 +186,7 @@ def assainir_nom_fichier(nom):
     nom_propre = re.sub(r'\s+', ' ', nom_propre)
     return nom_propre
 
+
 def nettoyer_valeur(val):
     if val is None:
         return ""
@@ -121,6 +194,7 @@ def nettoyer_valeur(val):
         return str(int(val))
     val_str = str(val).strip()
     return "" if val_str.lower() in ("none", "nan") else val_str
+
 
 def remplacer_dans_paragraphe(paragraph, valeur, couleur=None):
     valeur = nettoyer_valeur(valeur)
@@ -145,6 +219,7 @@ def remplacer_dans_paragraphe(paragraph, valeur, couleur=None):
             if r.text.strip() in ('.', '..', '...'):
                 r.text = ''
 
+
 def generer_tous_les_bons(forcer_tout=False):
     if not os.path.exists(FICHIER_EXCEL):
         print(f"Erreur : Le fichier {FICHIER_EXCEL} est introuvable.")
@@ -152,6 +227,10 @@ def generer_tous_les_bons(forcer_tout=False):
 
     if not os.path.exists(MODELE_WORD):
         print(f"Erreur : Le modèle Word {MODELE_WORD} est introuvable.")
+        return
+
+    if qrcode is None:
+        print("Erreur : module qrcode manquant. Lancez : pip install qrcode[pil]")
         return
 
     wb = load_workbook(FICHIER_EXCEL)
@@ -192,7 +271,7 @@ def generer_tous_les_bons(forcer_tout=False):
 
         doc = Document(MODELE_WORD)
 
-        # Filigrane au centre de la page
+        # Filigrane
         ajouter_filigrane_centre(doc, reference)
 
         date_val = data.get("Date_Emission")
@@ -203,6 +282,9 @@ def generer_tous_les_bons(forcer_tout=False):
         else:
             date_emission = datetime.now().strftime("%d/%m/%Y")
 
+        heure_gen = datetime.now().strftime("%H:%M:%S")
+        utilisateur_gen = nettoyer_valeur(data.get("Utilisateur")) or "Systeme"
+
         tel_fourn     = data.get("Telephone_Fournisseur")
         commune       = data.get("Commune_Origine")
         quantite      = data.get("Quantite")
@@ -210,6 +292,14 @@ def generer_tous_les_bons(forcer_tout=False):
         chauffeur     = data.get("Chauffeur")
         permis        = data.get("Numero_Permis")
         tel_chauffeur = data.get("Telephone_Chauffeur")
+
+        # --- QR haut droite ---
+        texte_qr = (
+            f"STE NAP SARL|BC|{reference}|"
+            f"{nettoyer_valeur(nom)}|"
+            f"{date_emission}|{heure_gen}|{utilisateur_gen}"
+        )
+        inserer_qr_haut_droite(doc, texte_qr, largeur_cm=2.2)
 
         section_actuelle = None
 
@@ -262,6 +352,7 @@ def generer_tous_les_bons(forcer_tout=False):
         print("Aucun nouveau bon à générer (tous les fichiers sont déjà présents).")
     else:
         print(f"Terminé ! {compteur} bon(s) généré(s) avec succès.")
+
 
 if __name__ == "__main__":
     forcer = "--tout" in sys.argv or "--force" in sys.argv or "--regenerer" in sys.argv
